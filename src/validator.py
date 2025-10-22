@@ -1,8 +1,7 @@
 """
 MCD Token Validator - Core Implementation
 
-This module implements all MCD requirements with inline documentation.
-Each requirement from the PRD is marked with a comment.
+This module implements all MCD requirements.
 """
 
 import time

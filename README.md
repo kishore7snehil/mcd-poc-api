@@ -2,34 +2,6 @@
 
 Reference implementation of Multi-Custom Domain (MCD) support for JWT validation with Auth0.
 
-## Features
-
-### Three Issuer Validation Methods
-
-**Method 1: Single Issuer**
-```python
-IssuerValidator(domain="tenant.auth0.com")
-```
-
-**Method 2: Static Array**
-```python
-IssuerValidator(issuers=["https://tenant.auth0.com", "https://custom.example.com"])
-```
-
-**Method 3: Dynamic Resolver**
-```python
-async def resolver(context):
-    return context.token_issuer in await db.get_allowed_issuers()
-
-IssuerValidator(resolver=resolver)
-```
-
-### Security
-
-- Issuer validation BEFORE JWKS fetch (prevents SSRF)
-- Per-issuer JWKS caching
-- Issuer validation result caching
-- Request context support for multi-tenant scenarios
 
 ## Quick Start
 
