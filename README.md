@@ -1,4 +1,4 @@
-# MCD PoC - Multi-Custom Domain Token Validation
+# Multiple Custom Domain (MCD) Token Validator
 
 Reference implementation of Multi-Custom Domain (MCD) support for JWT validation with Auth0.
 
