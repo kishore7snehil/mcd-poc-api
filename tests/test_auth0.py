@@ -189,7 +189,10 @@ async def test_caching():
 
 
 async def dynamic_resolver(context: ValidationContext):
-    """Dynamic issuer resolver with request context access"""
+    """
+    Dynamic issuer resolver with request context access.
+    Returns JWKS URL if issuer is valid, None if invalid.
+    """
     is_valid_domain = (context.token_issuer.endswith(".auth0.com") or 
                        context.token_issuer.endswith(".acmetest.org"))
     
@@ -199,7 +202,11 @@ async def dynamic_resolver(context: ValidationContext):
     if context.request_headers:
         print(f"    [Resolver] Request headers available: {len(context.request_headers)} headers")
     
-    return is_valid_domain
+    # Return JWKS URL if valid, None if invalid
+    if is_valid_domain:
+        return f"{context.token_issuer}/.well-known/jwks.json"
+    else:
+        return None
 
 
 async def fetch_token(issuer: str) -> str:

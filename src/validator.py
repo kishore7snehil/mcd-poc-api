@@ -43,6 +43,7 @@ class IssuerValidator:
     2. Static list (e.g., issuers=["https://a.com", "https://b.com"])
     3. Dynamic resolver (e.g., resolver=my_function)
     
+    For dynamic resolver: Returns JWKS URL if valid, None if invalid.
     Caches validation results to improve performance.
     """
     
@@ -72,8 +73,8 @@ class IssuerValidator:
         elif issuers:
             self._allowed_issuers = [self._normalize(iss) for iss in issuers]
         
-        # Cache: {issuer: (is_valid, timestamp)}
-        self._cache: Dict[str, Tuple[bool, float]] = {}
+        # Cache: {issuer: (is_valid, jwks_url, timestamp)}
+        self._cache: Dict[str, Tuple[bool, Optional[str], float]] = {}
     
     def _normalize(self, issuer: str) -> str:
         """Convert 'tenant.auth0.com' to 'https://tenant.auth0.com'"""
@@ -82,22 +83,26 @@ class IssuerValidator:
             issuer = f"https://{issuer}"
         return issuer.rstrip("/")
     
-    async def validate(self, context: ValidationContext) -> bool:
+    async def validate(self, context: ValidationContext) -> Tuple[bool, Optional[str]]:
         """
         Check if the token's issuer is allowed.
-        Uses cache to avoid repeated validation.
+        Returns: (is_valid, jwks_url)
+        - For single/static mode: jwks_url is None (use default /.well-known/jwks.json)
+        - For dynamic resolver: jwks_url is returned by resolver or None if invalid
         """
         issuer = context.token_issuer
         
         # Check cache first
         if issuer in self._cache:
-            is_valid, timestamp = self._cache[issuer]
+            is_valid, jwks_url, timestamp = self._cache[issuer]
             if time.time() - timestamp < self.cache_ttl:
-                return is_valid  # Cache hit!
+                return (is_valid, jwks_url)  # Cache hit!
             else:
                 del self._cache[issuer]  # Expired, remove it
         
         # Perform validation based on what was configured
+        jwks_url = None
+        
         if self.domain:
             # Single domain mode: simple equality check
             result = (issuer == self._allowed_issuer)
@@ -107,20 +112,28 @@ class IssuerValidator:
             result = (issuer in self._allowed_issuers)
         
         else:
-            # Dynamic resolver mode: call the user's function
+            # Dynamic resolver mode: returns JWKS URL if valid, None if invalid
             try:
-                result = self.resolver(context)
+                resolver_result = self.resolver(context)
                 # Handle async resolvers
-                if hasattr(result, '__await__'):
-                    result = await result
-                result = bool(result)
+                if hasattr(resolver_result, '__await__'):
+                    resolver_result = await resolver_result
+                
+                # Resolver returns JWKS URL (string) if valid, None/null if invalid
+                if resolver_result is None:
+                    result = False
+                    jwks_url = None
+                else:
+                    result = True
+                    jwks_url = str(resolver_result)  # Convert to string if URL object
             except Exception:
                 # If resolver fails, reject for security
                 result = False
+                jwks_url = None
         
         # Cache the result
-        self._cache[issuer] = (result, time.time())
-        return result
+        self._cache[issuer] = (result, jwks_url, time.time())
+        return (result, jwks_url)
     
     def clear_cache(self) -> None:
         """Clear the validation cache"""
@@ -138,28 +151,41 @@ class JWKSManager:
         self._cache: Dict[str, Tuple[Dict[str, Any], float]] = {}  # {issuer: (jwks, timestamp)}
     
     async def get_jwks(self, issuer: str) -> Dict[str, Any]:
-        """Fetch JWKS from issuer, using cache if available"""
+        """Fetch JWKS from issuer using default /.well-known/jwks.json path"""
+        jwks_uri = f"{issuer}/.well-known/jwks.json"
+        return await self.get_jwks_from_url(jwks_uri, cache_key=issuer)
+    
+    async def get_jwks_from_url(self, jwks_url: str, cache_key: Optional[str] = None) -> Dict[str, Any]:
+        """Fetch JWKS from a custom URL (used when resolver provides JWKS URL)"""
+        
+        # Ensure jwks_url is a string (in case URL object was passed)
+        jwks_url = str(jwks_url) if jwks_url else None
+        if not jwks_url:
+            raise JWKSFetchError("JWKS URL is empty", issuer="unknown", jwks_uri="")
+        
+        # Use URL as cache key if not provided
+        if cache_key is None:
+            cache_key = jwks_url
         
         # Check cache first
-        if issuer in self._cache:
-            jwks_data, timestamp = self._cache[issuer]
+        if cache_key in self._cache:
+            jwks_data, timestamp = self._cache[cache_key]
             if time.time() - timestamp < self.cache_ttl:
                 return jwks_data  # Cache hit!
         
-        # Fetch from issuer
-        jwks_uri = f"{issuer}/.well-known/jwks.json"
+        # Fetch from URL
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(jwks_uri, timeout=10.0)
+                response = await client.get(jwks_url, timeout=10.0)
                 response.raise_for_status()
                 jwks_data = response.json()
             
             # Cache it
-            self._cache[issuer] = (jwks_data, time.time())
+            self._cache[cache_key] = (jwks_data, time.time())
             return jwks_data
             
         except Exception as e:
-            raise JWKSFetchError(f"Failed to fetch JWKS: {e}", issuer=issuer, jwks_uri=jwks_uri) from e
+            raise JWKSFetchError(f"Failed to fetch JWKS from '{jwks_url}': {e}", issuer=cache_key, jwks_uri=jwks_url) from e
     
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -218,12 +244,16 @@ class TokenValidator:
             request_url=request_context.get("url") if request_context else None
         )
         
-        is_valid = await self.issuer_validator.validate(validation_context)
+        is_valid, jwks_url = await self.issuer_validator.validate(validation_context)
         if not is_valid:
             raise IssuerValidationError(f"Issuer '{token_issuer}' is not allowed", issuer=token_issuer)
         
         # STEP 3: Fetch JWKS from validated issuer
-        jwks_data = await self.jwks_manager.get_jwks(token_issuer)
+        # If resolver provided custom JWKS URL, use it; otherwise use default
+        if jwks_url:
+            jwks_data = await self.jwks_manager.get_jwks_from_url(jwks_url)
+        else:
+            jwks_data = await self.jwks_manager.get_jwks(token_issuer)
         
         # STEP 4: Verify signature with JWKS
         try:
