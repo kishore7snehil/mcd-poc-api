@@ -52,7 +52,7 @@ class IssuerValidator:
         domain: Optional[str] = None,
         issuers: Optional[List[str]] = None,
         resolver: Optional[Callable] = None,
-        cache_ttl: int = 3600
+        cache_ttl: int = 600  # Default: 10 minutes
     ):
         # Ensure exactly one method is provided
         config_count = sum([domain is not None, issuers is not None, resolver is not None])
@@ -146,8 +146,8 @@ class JWKSManager:
     JWKS URL format: {issuer}/.well-known/jwks.json
     """
     
-    def __init__(self, cache_ttl: int = 600):
-        self.cache_ttl = cache_ttl  # Default: 10 minutes
+    def __init__(self, cache_ttl: int = 3600):
+        self.cache_ttl = cache_ttl  # Default: 1 hour
         self._cache: Dict[str, Tuple[Dict[str, Any], float]] = {}  # {issuer: (jwks, timestamp)}
     
     async def get_jwks(self, issuer: str) -> Dict[str, Any]:
